@@ -1,0 +1,895 @@
+library(tidyverse)
+library(readxl)
+library(writexl)
+library(dplyr)
+library(ggpubr)
+library(UpSetR)
+library(superheat)
+library(VennDiagram)
+library(viridis)
+library(ggmosaic)
+library(devtools)
+library(ComplexHeatmap)
+
+#load in files###
+chemical_summary <- read_excel("benchmark_comp_file_05_08_2024_for_MS1_analysis.xlsx", "Chemical Summary") %>% distinct()
+e_fate <- read_excel("efate_24_05_2022_EM.xlsx") %>% rename("EFate" = "Final Classification", "Half_life_days" = "t1/2 (d)", "BCF_Lkg" = "BCF (L/kg)")
+benchmark_coverage <- read_excel("benchmark_comp_file_05_08_2024_for_MS1_analysis.xlsx", "Included Benchmarks")
+
+#benchmark_coverage####
+cas_names <- chemical_summary %>% select(CAS, chnm) %>% distinct()
+
+benchmark_coverage_water <- chemical_summary %>% 
+  filter(type == "Water") %>% select(CAS, benchmarks, type) %>% distinct() %>% spread(key = "benchmarks", value = "type")
+benchmark_coverage_water[is.na(benchmark_coverage_water)] <- "FALSE"
+
+benchmark_coverage_water$Sample_Type <- "Grab/Composite"
+
+benchmark_coverage_passive <- chemical_summary %>% 
+  filter(type == "Passive") %>% select(CAS, benchmarks, type) %>% distinct() %>% spread(key = "benchmarks", value = "type")
+benchmark_coverage_passive[is.na(benchmark_coverage_passive)] <- "FALSE"
+benchmark_coverage_passive$Sample_Type <- "Passive"
+
+benchmark_coverage_all <- bind_rows(benchmark_coverage_water, benchmark_coverage_passive)
+benchmark_coverage_all <- left_join(benchmark_coverage_all, cas_class)
+benchmark_coverage_all <- left_join(benchmark_coverage_all, cas_names) %>% distinct()
+
+#Re-Classification####
+cas_class <- benchmark_coverage %>% select(CAS, Class)
+cas_class$Class <- ifelse(cas_class$Class %in% c("PAHs", "Fuels"), "Fuels/PAHs",
+                          ifelse(cas_class$Class %in% c("Miscellaneous", "Flavors and fragrances", "Antioxidants", "Dyes/pigments", "Solvents", "PCBs", "Antimicrobial disinfectants", "Plastics additives"), "Industrial/Multi-Use Compounds", 
+                                 ifelse(cas_class$Class %in% c("PBDEs", "Fire retardants"), "Flame retardants",
+                                        ifelse(cas_class$Class %in% c("Hormone", "Sterols", "Detergent metabolites"), "WWIs",
+                                               ifelse(cas_class$Class == "Pharmaceuticals and personal care products", "PPCPs",
+                                               cas_class$Class)))))
+list(unique(cas_class$Class))
+
+#E-Fate Binning ####
+names(e_fate)
+list(unique(e_fate$EFate))
+
+e_fate$EFate_Bin <- ifelse(e_fate$EFate %in% c("nPnB"), "Bin 1",
+                           ifelse(e_fate$EFate %in% c("P", "B", "PnB", "nPB"), "Bin 2",
+                                  ifelse(e_fate$EFate %in% c("PB"), "Bin 3",
+                                  ifelse(e_fate$EFate %in% c("vP", "vB", "vPnB"), "Bin 4",
+                                         ifelse(e_fate$EFate %in% c("PvB", "vPB"), "Bin 5",
+                                                ifelse(e_fate$EFate == "vPvB", "Bin 6",
+                                                       ifelse(is.na(e_fate$EFate), "DL",
+                                                              ifelse(e_fate$EFate %in% c("nP/nB - Data Limited", "nPDL", "DLnB"), "DL", "misc"))))))))
+
+
+e_fate$EFate_BS <- ifelse(e_fate$EFate_Bin == "Bin 1", 1,
+                          ifelse(e_fate$EFate_Bin == "Bin 2", 2,
+                                 ifelse(e_fate$EFate_Bin == "Bin 3", 3,
+                                        ifelse(e_fate$EFate_Bin == "Bin 4", 4,
+                                               ifelse(e_fate$EFate_Bin == "Bin 5", 5,
+                                                      ifelse(e_fate$EFate_Bin == "Bin 6", 6, 
+                                                             NA))))))
+
+e_fate_1 <- e_fate %>% select(CAS, Half_life_days, BCF_Lkg, EFate_Bin, EFate_BS, EFate)
+
+#water prioritization####
+water_summary <- chemical_summary %>% filter(type == "Water", det_freq != "0")
+water_summary <- left_join(water_summary, cas_class) %>% select(CAS, type, chnm, benchmarks, det_freq, TQ_max, Class)
+
+#ecotox binning ####
+TQ1_water_summary <- water_summary %>% filter(benchmarks %in% c("Tier_2_AF_adjusted_BM", "Tier_2_Unadjusted_BM","Tier_1_Unadjusted_BM",
+                                                              "Tier_1_AF_adjusted_BM", "Screening_Apical", "Screening_Estimate", 
+                                                              "Water_Quality_Benchmark", "Cytotox - AF-adjusted BM", "Cytotox - Unadjusted BM"))
+
+TQ1_water_summary$Bin <- "misc"
+TQ1_water_summary$Bin <- ifelse((TQ1_water_summary$det_freq >= 0.5 & TQ1_water_summary$TQ_max >= 1.0), "Bin 6", TQ1_water_summary$Bin)
+TQ1_water_summary$Bin <- ifelse((TQ1_water_summary$det_freq >= 0.1 & TQ1_water_summary$det_freq < 0.5 & TQ1_water_summary$TQ_max >= 1.0), "Bin 5", TQ1_water_summary$Bin)
+TQ1_water_summary$Bin <- ifelse((TQ1_water_summary$det_freq >= 0.5 & TQ1_water_summary$TQ_max < 1.0 & TQ1_water_summary$TQ_max >= 0.001), "Bin 5", TQ1_water_summary$Bin)
+TQ1_water_summary$Bin <- ifelse((TQ1_water_summary$det_freq < 0.1 & TQ1_water_summary$TQ_max >= 1.0), "Bin 4", TQ1_water_summary$Bin)
+TQ1_water_summary$Bin <- ifelse((TQ1_water_summary$det_freq >= 0.5 & TQ1_water_summary$TQ_max <0.001), "Bin 4", TQ1_water_summary$Bin)
+TQ1_water_summary$Bin <- ifelse((TQ1_water_summary$det_freq >= 0.1 & TQ1_water_summary$det_freq < 0.5 & TQ1_water_summary$TQ_max >= 0.001 & TQ1_water_summary$TQ_max < 1), "Bin 3",TQ1_water_summary$Bin)
+TQ1_water_summary$Bin <- ifelse((TQ1_water_summary$det_freq < 0.1 & TQ1_water_summary$TQ_max >= 0.001 & TQ1_water_summary$TQ_max < 1.0), "Bin 2", TQ1_water_summary$Bin)
+TQ1_water_summary$Bin <- ifelse((TQ1_water_summary$det_freq >= 0.1 & TQ1_water_summary$det_freq < 0.5 & TQ1_water_summary$TQ_max < 0.001), "Bin 2", TQ1_water_summary$Bin)
+TQ1_water_summary$Bin <- ifelse((TQ1_water_summary$det_freq < 0.1 & TQ1_water_summary$TQ_max < 0.001), "Bin 1", TQ1_water_summary$Bin)
+
+TQ_0.001_water_summary <- water_summary %>% filter(benchmarks %in% c("ToxCast - AF-adjusted BM", "ToxCast - Unadjusted BM", "QSAR", "Pharm_Potential"))
+
+TQ_0.001_water_summary$Bin <- "misc"
+TQ_0.001_water_summary$Bin <- ifelse((TQ_0.001_water_summary$det_freq >= 0.5 & TQ_0.001_water_summary$TQ_max >= 0.001), "Bin 6", TQ_0.001_water_summary$Bin)
+TQ_0.001_water_summary$Bin <- ifelse((TQ_0.001_water_summary$det_freq >= 0.1 & TQ_0.001_water_summary$det_freq < 0.5 & TQ_0.001_water_summary$TQ_max >= 0.001), "Bin 5", TQ_0.001_water_summary$Bin)
+TQ_0.001_water_summary$Bin <- ifelse((TQ_0.001_water_summary$det_freq >= 0.5 & TQ_0.001_water_summary$TQ_max < 0.001 & TQ_0.001_water_summary$TQ_max >= 0.000001), "Bin 5", TQ_0.001_water_summary$Bin)
+TQ_0.001_water_summary$Bin <- ifelse((TQ_0.001_water_summary$det_freq < 0.1 & TQ_0.001_water_summary$TQ_max >= 0.001), "Bin 4", TQ_0.001_water_summary$Bin)
+TQ_0.001_water_summary$Bin <- ifelse((TQ_0.001_water_summary$det_freq >= 0.5 & TQ_0.001_water_summary$TQ_max <0.000001), "Bin 4", TQ_0.001_water_summary$Bin)
+TQ_0.001_water_summary$Bin <- ifelse((TQ_0.001_water_summary$det_freq >= 0.1 & TQ_0.001_water_summary$det_freq < 0.5 & TQ_0.001_water_summary$TQ_max >= 0.000001 & TQ_0.001_water_summary$TQ_max < 0.001), "Bin 3",TQ_0.001_water_summary$Bin)
+TQ_0.001_water_summary$Bin <- ifelse((TQ_0.001_water_summary$det_freq < 0.1 & TQ_0.001_water_summary$TQ_max >= 0.000001 & TQ_0.001_water_summary$TQ_max < 0.001), "Bin 2", TQ_0.001_water_summary$Bin)
+TQ_0.001_water_summary$Bin <- ifelse((TQ_0.001_water_summary$det_freq >= 0.1 & TQ_0.001_water_summary$det_freq < 0.5 & TQ_0.001_water_summary$TQ_max < 0.000001), "Bin 2", TQ_0.001_water_summary$Bin)
+TQ_0.001_water_summary$Bin <- ifelse((TQ_0.001_water_summary$det_freq < 0.1 & TQ_0.001_water_summary$TQ_max < 0.000001), "Bin 1", TQ_0.001_water_summary$Bin)
+
+water_summary <- bind_rows(TQ1_water_summary, TQ_0.001_water_summary)
+
+water_summary$LoE_BS <- ifelse(water_summary$Bin == "Bin 1", 1,
+                                  ifelse(water_summary$Bin == "Bin 2", 2,
+                                         ifelse(water_summary$Bin == "Bin 3", 3,
+                                                ifelse(water_summary$Bin == "Bin 4", 4, 
+                                                       ifelse(water_summary$Bin == "Bin 5", 5, 
+                                                              ifelse(water_summary$Bin == "Bin 6", 6, NA))))))
+
+#TARGET LOE ==  WQB####
+wqb_water <- water_summary %>% filter(benchmarks == "Water_Quality_Benchmark") %>% distinct() %>% select(Class, det_freq, TQ_max, CAS, chnm, type, Bin, LoE_BS)
+wqb_water$Class <- as.factor(wqb_water$Class)
+summary(wqb_water)
+
+wqb_water_class_sum <- wqb_water %>% group_by(Class) %>% summarize(n_chem = n_distinct(CAS))
+pie(wqb_water_class_sum$n_chem, labels = wqb_water_class_sum$Class, col = viridis(n = 6))
+
+#target LoE###
+#plot maxTQ vs. detection frequency & bin###
+wqb_water$Priority_Group <- ifelse(wqb_water$Bin %in% c("Bin 5", "Bin 6"), "High Priority",
+                                   ifelse(wqb_water$Bin %in% c("Bin 4", "Bin 3"), "Medium Priority",
+                                          ifelse(wqb_water$Bin %in% c("Bin 1", "Bin 2"), "Low Priority",
+                                                                      "misc")))
+
+
+wqb_water$Priority_Group <- as.factor(wqb_water$Priority_Group)
+summary(wqb_water$Priority_Group)
+
+#target LoE scatterplot### 
+wqb_water_scatter <- wqb_water %>% ggscatter("det_freq", "TQ_max", color = "black", fill = "Bin", palette = viridis(n = 6, option = "magma"), size = 3, shape = 21) + scale_y_log10() +
+  geom_hline(yintercept = 0.001, linetype = "dashed") + geom_hline(yintercept = 1, linetype = "dashed") + geom_vline(xintercept = 0.1, linetype = "dashed") + 
+  geom_vline(xintercept = 0.5, linetype = "dashed") + xlab("Detection Frequency (%)") + ylab("Maximum Toxicity Quotient (TQ_max)")
+wqb_water_scatter
+ggsave("WQB_scatter.jpeg", wqb_water_scatter, height = 5, width = 7.5)
+
+#WoE evaluation###
+wqb_cas <- wqb_water %>% select(CAS, chnm, Class)
+
+WoE_data <- left_join(wqb_cas, water_summary) %>% filter(benchmarks != "Water_Quality_Benchmarks")
+WoE_data_1 <- WoE_data %>% group_by(CAS, chnm, Class) %>% summarize(WoE_BS = median(LoE_BS, na.rm = TRUE))
+WoE_data_1$WoE_Priority <- ifelse(WoE_data_1$WoE_BS <= 2, "Low Priority", 
+                                  ifelse(WoE_data_1$WoE_BS >= 5, "High Priority",
+                                         ifelse(WoE_data_1$WoE_BS > 2 & WoE_data_1$WoE_BS < 5, "Medium Priority", "misc")))
+
+WoE_data_1$WoE_Priority <- as.factor(WoE_data_1$WoE_Priority)
+summary(WoE_data_1$WoE_Priority)
+
+#make heat map for WQB WoE####
+WoE_heatmap <- WoE_data %>% select(CAS, benchmarks, LoE_BS) %>% distinct() %>% spread(key = benchmarks, value = LoE_BS)
+WoE_heatmap[is.na(WoE_heatmap)] <- 0
+
+WoE_heatmap_1 <- left_join(WoE_heatmap,WoE_data_1)%>% arrange(WoE_BS) %>% column_to_rownames("CAS")%>% select(-c(Class, WoE_Priority, chnm))
+WoE_heatmap_1 <- as.matrix(WoE_heatmap_1)
+
+superheat(WoE_heatmap_1, row.title = "Ecotoxicological Line of Evidence", column.title = "Detected Chemical", 
+          bottom.label.text.angle = 90, left.label.col = "white", bottom.label.col = "white")
+
+#compare WoE BS to LoE BS####
+wqb_water_WoELoE <- left_join(wqb_water, WoE_data_1)
+wqb_water_WoELoE$Flag <- ifelse(wqb_water_WoELoE$WoE_Priority != wqb_water_WoELoE$Priority_Group, "Flag", "-")
+wqb_water_WoELoE$Flag_Description <- ifelse((wqb_water_WoELoE$WoE_BS > wqb_water_WoELoE$LoE_BS) & wqb_water_WoELoE$Flag == "Flag", "Higher Risk",
+                                 ifelse((wqb_water_WoELoE$WoE_BS < wqb_water_WoELoE$LoE_BS) & wqb_water_WoELoE$Flag == "Flag", "Lower Risk",
+                                        "-"))
+wqb_water_WoELoE$Flag_Decision <- ifelse(wqb_water_WoELoE$Flag_Description %in% c("Lower Risk", "Higher Risk"), "Include Uncertainty Flag on Final Prioritization",
+                                                "-")
+View(wqb_water_WoELoE)
+
+#Environmental Fate####
+wqb_water_efate <- left_join(wqb_water_WoELoE, e_fate_1)
+wqb_water_efate
+
+wqb_water_efate$EFate_Bin <- as.factor(wqb_water_efate$EFate_Bin)
+summary(wqb_water_efate$EFate_Bin)
+
+#EFate Scatterplot####
+wqb_water_efate1 <- wqb_water_efate %>% filter(Half_life_days != "-") 
+wqb_water_efate1$Half_life_days <- as.numeric(wqb_water_efate1$Half_life_days)
+wqb_water_efate1$BCF_Lkg <- as.numeric(wqb_water_efate1$BCF_Lkg)
+
+wqb_efate_plot <- wqb_water_efate1 %>% 
+  ggscatter("Half_life_days", "BCF_Lkg", color = "black", fill = "EFate_Bin", palette = viridis(n = 6, option = "plasma"), size = 3, shape = 21) +
+  geom_hline(yintercept = 2000, linetype = "dashed") + geom_hline(yintercept = 5000, linetype = "dashed") + geom_vline(xintercept = 40, linetype = "dashed") + 
+  geom_vline(xintercept = 60, linetype = "dashed") + xlab("Aquatic Half-Life (t1/2, d)") + ylab("Bioconcentration Factor (BCF; L/kg)") + scale_y_log10() + scale_x_log10()
+wqb_efate_plot
+ggsave("WQB_EFate_scatter.jpeg", wqb_water_scatter, height = 5, width = 7.5)
+
+#get final PBT PS### 
+wqb_water_efate$EFate_BS <- ifelse(is.na(wqb_water_efate$EFate_BS), wqb_water_efate$LoE_BS, wqb_water_efate$EFate_BS)
+
+PBT_BinScore <- wqb_water_efate %>% select(CAS, LoE_BS, EFate_BS) %>% gather(LoE_BS:EFate_BS, key = "BS_type", value = "BS") %>% 
+  group_by(CAS) %>% summarize(PBT_BinScore = median(BS))
+
+PBT_wqb_water <- left_join(wqb_water_efate, PBT_BinScore)
+
+PBT_wqb_water$PBT_priority <- ifelse(PBT_wqb_water$PBT_BinScore <= 2, "Low Priority",
+                                         ifelse(PBT_wqb_water$PBT_BinScore >= 4.5, "High Priority",
+                                                ifelse(PBT_wqb_water$PBT_BinScore > 2 & PBT_wqb_water$PBT_BinScore < 4.5, "Medium Priority",
+                                                       "Data Limited")))
+
+PBT_wqb_water$Final_Priority_Class <- PBT_wqb_water$PBT_priority
+PBT_wqb_water$Final_Priority_Class <- ifelse(PBT_wqb_water$Flag_Decision == "Include Uncertainty Flag on Final Prioritization",
+                                             paste(PBT_wqb_water$PBT_priority, "a"),
+                                                          PBT_wqb_water$PBT_priority)
+
+PBT_wqb_water$PBT_priority <- as.factor(PBT_wqb_water$PBT_priority)
+summary(PBT_wqb_water$PBT_priority)
+
+PBT_wqb_water$Final_Priority_Class <- as.factor(PBT_wqb_water$Final_Priority_Class)
+summary(PBT_wqb_water$Final_Priority_Class)
+write_xlsx(PBT_wqb_water, "Water_WQB_prioritization.xlsx")
+
+#create Complex heatmap### 
+wqb_prioritization_heatmap <- PBT_wqb_water %>% arrange(desc(PBT_BinScore)) %>% select(CAS, LoE_BS, WoE_BS, EFate_BS, PBT_BinScore) %>%
+  rename("Target LoE" = LoE_BS, "WoE" = WoE_BS, "Fate" = EFate_BS,"Final" = PBT_BinScore) %>%
+  distinct() %>% column_to_rownames("CAS")
+wqb_prioritization_heatmap <- as.matrix(wqb_prioritization_heatmap)
+
+wqb_class <- PBT_wqb_water %>% arrange(desc(PBT_BinScore)) %>% select(CAS, Class) %>% distinct() %>% ungroup() %>% select(Class)
+wqb_class <- as.matrix(wqb_class)
+
+PBT_wqb_water$PBT_priority <- factor(PBT_wqb_water$PBT_priority, levels = c("Low Priority", "Medium Priority", "High Priority"))
+cas_prior <- PBT_wqb_water%>% arrange(desc(PBT_BinScore)) %>% select(CAS, PBT_priority) %>% distinct() %>% ungroup() %>% select(PBT_priority)
+cas_prior <- as.matrix(cas_prior)
+
+row_ha = rowAnnotation(Classification = wqb_class, col = list(Classification = c("Pesticides" = "#22a884",
+                                                                                 "PPCPs" = "#7ad151",
+                                                                                 "WWIs" = "#fde725",
+                                                                                 "Fuels/PAHs" = "#414487",
+                                                                                 "Flame retardants" = "#440154",
+                                                                                 "Industrial/Multi-Use Compounds" = "#2a788e")))
+
+wqb_prioritization_heatmap_final <- Heatmap(wqb_prioritization_heatmap, col = c("#000004","#420a68","#932667", "#dd513a","#fca50a","#fcffa4"), column_title_side = "bottom", 
+                                  row_title_side = "left", show_heatmap_legend = TRUE, row_names_side = "left", 
+                                  row_title = "Detected Chemical", column_title = "Prioritization Scores", show_row_names = TRUE, left_annotation = row_ha, cluster_rows = FALSE, cluster_columns = FALSE,
+                                  row_names_gp = grid::gpar(fontsize = 8), row_split = factor(cas_prior, levels = c("High Priority", "Medium Priority", "Low Priority")))
+
+wqb_prioritization_heatmap_final
+
+#TARGET LOE = APICAL####
+names(water_summary)
+names(benchmark_coverage_water)
+
+apical_CAS_list <- benchmark_coverage_water %>% filter(Water_Quality_Benchmark == "FALSE", Tier_1_AF_adjusted_BM  == "Water"| Screening_Apical == "Water") %>% select(CAS) %>% distinct()
+apical_water <- left_join(apical_CAS_list, water_summary) %>% filter(!det_freq %in% c(NA, "0"))
+apical_CAS_list <- apical_water %>% select(CAS) %>% distinct()
+
+#class summary
+apical_water_class <- apical_water %>% select(CAS, Class) %>% distinct()
+apical_water_class$Class <- as.factor(apical_water_class$Class)
+summary(apical_water_class)
+
+apical_water_class_sum <- apical_water_class %>% group_by(Class) %>% summarize(n_chem = n_distinct(CAS))
+pie(apical_water_class_sum$n_chem, labels = apical_water_class_sum$Class, col = viridis(n = 6))
+
+#demonstrate benchmark coverage for LoE with an upset plot###
+
+upset_apical <- water_summary %>% select(benchmarks, CAS) %>% filter(!is.na(benchmarks)) %>% distinct()
+upset_apical$benchmarks <- gsub("Tier_2_AF_adjusted_BM", "Tier2_AF_adjusted_ECOTOX", upset_apical$benchmarks)
+upset_apical$benchmarks <- gsub("Tier_2_Unadjusted_BM", "Tier2_ECOTOX", upset_apical$benchmarks)
+upset_apical$benchmarks <- gsub("Tier_1_AF_adjusted_BM", "Tier1_AF_adjusted_ECOTOX", upset_apical$benchmarks)
+upset_apical$benchmarks <- gsub("Tier_1_Unadjusted_BM", "Tier1_ECOTOX", upset_apical$benchmarks)
+upset_apical$benchmarks <- gsub("ToxCast - AF-adjusted BM", "ToxCast_AF_adjusted", upset_apical$benchmarks)
+upset_apical$benchmarks <- gsub("ToxCast - Unadjusted BM", "ToxCast", upset_apical$benchmarks)
+upset_apical$benchmarks <- gsub("Cytotox - AF-adjusted BM", "Cytotox_AF_adjusted", upset_apical$benchmarks)
+upset_apical$benchmarks <- gsub("Cytotox - Unadjusted BM", "Cytotox", upset_apical$benchmarks)
+upset_apical$benchmarks <- gsub("Pharm_Potential", "Pharmacological", upset_apical$benchmarks)
+
+upset_apical$availability_score <- 1
+upset_apical_1 <- upset_apical  %>% filter(!benchmarks %in% c("Tier2_AF_adjusted_ECOTOX", "Tier1_AF_adjusted_ECOTOX", "ToxCast_AF_adjusted", "Cytotox_AF_adjusted")) %>%
+  spread(key = "benchmarks", value = "availability_score") %>% distinct() %>% column_to_rownames("CAS")
+upset_apical_1[is.na(upset_apical_1)] <- 0
+
+upset_apical_plot <- upset(upset_apical_1, nsets = 9, order.by = "freq",
+                            mainbar.y.label = "Ecological Hazard Data Availability",
+                            queries = list(
+                              list(query = intersects,
+                                   params = list("Tier1_ECOTOX", "Screening_Apical", "Tier2_ECOTOX", "Cytotox", "ToxCast", "QSAR"), 
+                                   color = "#21918c", 
+                                   active = T, 
+                                   query.name = "Estimated"),
+                              list(query = intersects,
+                                   params = list("Tier1_ECOTOX", "Screening_Apical", "Tier2_ECOTOX", "Cytotox", "ToxCast", "QSAR", "Pharmacological"), 
+                                   color = "#21918c", 
+                                   active = T, 
+                                   query.name = "Estimated"),
+                              list(query = intersects,
+                                   params = list("Tier1_ECOTOX", "Screening_Apical", "ToxCast", "QSAR", "Screening_Estimate"), 
+                                   color = "#21918c", 
+                                   active = T, 
+                                   query.name = "Estimated"),
+                              list(query = intersects,
+                                   params = list("Tier1_ECOTOX", "Screening_Apical", "ToxCast", "QSAR", "Cytotox"), 
+                                   color = "#21918c", 
+                                   active = T, 
+                                   query.name = "Estimated"),
+                              list(query = intersects,
+                                   params = list("Tier1_ECOTOX", "Screening_Apical", "ToxCast", "QSAR"), 
+                                   color = "#21918c", 
+                                   active = T, 
+                                   query.name = "Estimated"),
+                              list(query = intersects,
+                                   params = list("Tier1_ECOTOX", "Screening_Apical", "ToxCast", "QSAR", "Tier2_ECOTOX"), 
+                                   color = "#21918c", 
+                                   active = T, 
+                                   query.name = "Estimated"),
+                              list(query = intersects,
+                                   params = list("Screening_Apical", "Pharmacological", "QSAR"), 
+                                   color = "#21918c", 
+                                   active = T, 
+                                   query.name = "Estimated"),
+                              list(query = intersects,
+                                   params = list("Tier1_ECOTOX", "Screening_Apical", "ToxCast", "QSAR", "Tier2_ECOTOX", "Pharmacological"), 
+                                   color = "#21918c", 
+                                   active = T, 
+                                   query.name = "Estimated"),
+                              list(query = intersects,
+                                   params = list("Tier1_ECOTOX", "Pharmacological", "Screening_Estimate", "QSAR"), 
+                                   color = "#21918c", 
+                                   active = T, 
+                                   query.name = "Estimated"),
+                              list(query = intersects,
+                                   params = list("Tier1_ECOTOX", "ToxCast", "QSAR", "Tier2_ECOTOX", "Screening_Estimate"), 
+                                   color = "#21918c", 
+                                   active = T, 
+                                   query.name = "Estimated"),
+                              list(query = intersects,
+                                   params = list("Tier1_ECOTOX", "Screening_Apical", "QSAR"), 
+                                   color = "#21918c", 
+                                   active = T, 
+                                   query.name = "Estimated"),
+                              list(query = intersects,
+                                   params = list("Tier1_ECOTOX", "Screening_Apical", "ToxCast", "QSAR", "Pharmacological", "Cytotox"), 
+                                   color = "#21918c", 
+                                   active = T, 
+                                   query.name = "Estimated"),
+                              list(query = intersects,
+                                   params = list("Screening_Apical", "Screening_Estimate","QSAR"), 
+                                   color = "#21918c", 
+                                   active = T, 
+                                   query.name = "Estimated"),
+                              list(query = intersects,
+                                   params = list("Tier1_ECOTOX", "ToxCast", "Screening_Estimate","QSAR", "Cytotox", "Tier2_ECOTOX"), 
+                                   color = "#21918c", 
+                                   active = T, 
+                                   query.name = "Estimated"),
+                              list(query = intersects,
+                                   params = list("Tier1_ECOTOX", "ToxCast", "Screening_Estimate","QSAR", "Tier2_ECOTOX", "Screening_Apical"), 
+                                   color = "#21918c", 
+                                   active = T, 
+                                   query.name = "Estimated"),
+                              list(query = intersects,
+                                   params = list("Tier1_ECOTOX", "ToxCast", "Screening_Estimate","QSAR", "Tier2_ECOTOX", "Screening_Apical", "Cytotox"), 
+                                   color = "#21918c", 
+                                   active = T, 
+                                   query.name = "Estimated"),
+                              list(query = intersects,
+                                   params = list("Tier1_ECOTOX", "Screening_Apical", "QSAR", "Pharmacological"), 
+                                   color = "#21918c", 
+                                   active = T, 
+                                   query.name = "Estimated"),
+                              list(query = intersects,
+                                   params = list("ToxCast", "Screening_Apical", "QSAR", "Pharmacological", "Tier1_ECOTOX"), 
+                                   color = "#21918c", 
+                                   active = T, 
+                                   query.name = "Estimated"),
+                              list(query = intersects,
+                                   params = list("QSAR", "Screening_Estimate", "ToxCast", "Tier1_ECOTOX", "Pharmacological", "Tier2_ECOTOX", "Cytotox"), 
+                                   color = "#21918c", 
+                                   active = T, 
+                                   query.name = "Estimated"),
+                              list(query = intersects,
+                                   params = list("QSAR", "Tier1_ECOTOX", "Screening_Apical", "Pharmacological"), 
+                                   color = "#21918c", 
+                                   active = T, 
+                                   query.name = "Estimated"),
+                              list(query = intersects,
+                                   params = list("QSAR", "Tier1_ECOTOX", "Screening_Apical", "Tier2_ECOTOX"), 
+                                   color = "#21918c", 
+                                   active = T, 
+                                   query.name = "Estimated"),
+                              list(query = intersects,
+                                   params = list("QSAR", "Tier1_ECOTOX", "Screening_Estimate"), 
+                                   color = "#21918c", 
+                                   active = T, 
+                                   query.name = "Estimated"),
+                              list(query = intersects,
+                                   params = list("QSAR","ToxCast", "Screening_Apical", "Pharmacological", "Cytotox"), 
+                                   color = "#21918c", 
+                                   active = T, 
+                                   query.name = "Estimated"),
+                              list(query = intersects,
+                                   params = list("QSAR","Screening_Estimate", "ToxCast", "Tier1_ECOTOX", "Pharmacological", "Cytotox"), 
+                                   color = "#21918c", 
+                                   active = T, 
+                                   query.name = "Estimated")
+                              ))
+
+upset_apical_plot
+
+#Target LoE Prioritization####
+target_LoE <- apical_water %>% filter(benchmarks %in% c("Tier_1_Unadjusted_BM", "Tier_1_AF_adjusted_BM", "Screening_Apical"))
+target_LoE$Bin <- as.factor(target_LoE$Bin)
+
+screening_apical <- target_LoE %>% filter(benchmarks %in% c("Screening_Apical"))
+summary(screening_apical$Bin)
+
+tier1_unadjusted <- target_LoE %>% filter(benchmarks %in% c("Tier_1_Unadjusted_BM"))
+summary(tier1_unadjusted$Bin)
+
+tier1_AFadjusted <- target_LoE %>% filter(benchmarks %in% c("Tier_1_AF_adjusted_BM"))
+summary(tier1_AFadjusted$Bin)
+
+#scatterplots###
+apical_scatter <- target_LoE %>% ggscatter("det_freq", "TQ_max", color= "black", fill = "Bin", palette = viridis(n = 6, option = "magma"), size = 3, shape = 21, facet.by = "benchmarks", nrow = 3) + scale_y_log10() +
+  geom_hline(yintercept = 0.001, linetype = "dashed") + geom_hline(yintercept = 1, linetype = "dashed") + geom_vline(xintercept = 0.1, linetype = "dashed") + 
+  geom_vline(xintercept = 0.5, linetype = "dashed") + xlab("Detection Frequency (%)") + ylab("Maximum Toxicity Quotient (TQ_max)")
+apical_scatter
+ggsave("Apical_scatter.jpeg", apical_scatter, height = 10, width = 5)
+
+#Calculate median PS across target LoE#### 
+target_LoE_BS_final <- target_LoE %>% group_by(CAS) %>% summarize(target_LoE_BS_final = median(LoE_BS, na.rm = TRUE))
+target_LoE_final <- left_join(target_LoE_BS_final, (target_LoE %>% select(CAS, Class, chnm))) %>% distinct()  
+
+#Priority Grouping####
+target_LoE_final$Priority_Group <- ifelse(target_LoE_final$target_LoE_BS_final > 4, "High Priority",
+                                   ifelse(target_LoE_final$target_LoE_BS_final <= 4 & target_LoE_final$target_LoE_BS_final >2, "Medium Priority",
+                                          ifelse(target_LoE_final$target_LoE_BS_final<=2 , "Low Priority",
+                                                 "misc")))
+
+
+target_LoE_final$Priority_Group <- as.factor(target_LoE_final$Priority_Group)
+summary(target_LoE_final$Priority_Group)
+
+#heatmap for target LoE####
+target_LoE_forheatmap <- left_join((target_LoE %>% select(benchmarks, LoE_BS, CAS) %>% spread(key = benchmarks, value = LoE_BS)), target_LoE_final) %>%
+  rename("Tier1_unadjusted" = "Tier_1_Unadjusted_BM", "Tier1_AF_adjusted" = "Tier_1_AF_adjusted_BM")
+names(target_LoE_forheatmap)
+
+apical_LoE_prioritization_heatmap <- target_LoE_forheatmap %>% arrange(desc(target_LoE_BS_final)) %>% select(CAS, Screening_Apical, Tier1_AF_adjusted, Tier1_unadjusted, target_LoE_BS_final) %>%
+  rename("Target LoE" = target_LoE_BS_final) %>%
+  distinct() %>% column_to_rownames("CAS")
+apical_LoE_prioritization_heatmap <- as.matrix(apical_LoE_prioritization_heatmap)
+
+class <- target_LoE_forheatmap %>% arrange(desc(target_LoE_BS_final)) %>% select(CAS, Class) %>% distinct() %>% ungroup() %>% select(Class)
+class <- as.matrix(class)
+
+target_LoE_forheatmap$Priority_Group <- factor(target_LoE_forheatmap$Priority_Group, levels = c("Low Priority", "Medium Priority", "High Priority"))
+cas_prior <- target_LoE_forheatmap %>% arrange(desc(target_LoE_BS_final)) %>% select(CAS, Priority_Group) %>% distinct() %>% ungroup() %>% select(Priority_Group)
+cas_prior <- as.matrix(cas_prior)
+
+row_ha = rowAnnotation(Classification = class, col = list(Classification = c("Pesticides" = "#22a884",
+                                                                             "PPCPs" = "#7ad151",
+                                                                             "WWIs" = "#fde725",
+                                                                             "Fuels/PAHs" = "#414487",
+                                                                             "Flame retardants" = "#440154",
+                                                                             "Industrial/Multi-Use Compounds" = "#2a788e")))
+
+apical_LoE_prioritization_heatmap_final <- Heatmap(apical_LoE_prioritization_heatmap, col = c("#000004","#420a68","#932667", "#dd513a","#fca50a","#fcffa4"), column_title_side = "bottom", 
+                                               row_title_side = "left", show_heatmap_legend = TRUE, row_names_side = "left", 
+                                               row_title = "Detected Chemical", column_title = "Prioritization Scores", show_row_names = TRUE, left_annotation = row_ha, cluster_rows = FALSE, cluster_columns = FALSE,
+                                               row_names_gp = grid::gpar(fontsize = 8), row_split = factor(cas_prior, levels = c("High Priority", "Medium Priority", "Low Priority")))
+
+apical_LoE_prioritization_heatmap_final
+
+#WoE Prioritization####
+apical_cas <- target_LoE_final %>% select(CAS) %>% distinct()
+apical_water <- apical_water %>% distinct() %>% filter(!det_freq %in% c(NA, "-"))
+
+WoE_data <- left_join(apical_cas, apical_water) %>% distinct() %>% filter(!benchmarks %in% c("Tier_1_Unadjusted_BM", "Tier_1_AF_adjusted_BM", "Screening_Apical"))
+
+WoE_data_1 <- WoE_data %>% group_by(CAS, chnm, Class) %>% summarize(WoE_BS = median(LoE_BS, na.rm = TRUE)) %>% distinct()
+WoE_data_1$WoE_Priority <- ifelse(WoE_data_1$WoE_BS <= 2, "Low Priority", 
+                                  ifelse(WoE_data_1$WoE_BS >= 5, "High Priority",
+                                         ifelse(WoE_data_1$WoE_BS > 2 & WoE_data_1$WoE_BS < 5, "Medium Priority", "misc")))
+WoE_data_1$WoE_Priority <- as.factor(WoE_data_1$WoE_Priority)
+summary(WoE_data_1)
+
+#compare WoE BS to LoE PS####
+WoELoE_water <- left_join(target_LoE_final, WoE_data_1)
+WoELoE_water$Flag <- ifelse(WoELoE_water$WoE_Priority != WoELoE_water$Priority_Group, "Flag", "-")
+WoELoE_water$Flag_Description <- ifelse((WoELoE_water$WoE_BS > WoELoE_water$target_LoE_BS_final) & WoELoE_water$Flag == "Flag", "Higher Risk",
+                                            ifelse((WoELoE_water$WoE_BS < WoELoE_water$target_LoE_BS_final) & WoELoE_water$Flag == "Flag", "Lower Risk",
+                                                   "-"))
+WoELoE_water$Flag_Decision <- ifelse(WoELoE_water$Flag_Description %in% c("Lower Risk", "Higher Risk"), "Include Uncertainty Flag on Final Prioritization",
+                                                "-")
+
+WoELoE_water$Flag_Decision <- as.factor(WoELoE_water$Flag_Decision)
+summary(WoELoE_water$Flag_Decision)
+
+#make heat map for WQB WoE###
+WoE_heatmap <- WoE_data %>% select(CAS, chnm, benchmarks, LoE_BS) %>% distinct() %>% spread(key = benchmarks, value = LoE_BS) %>%
+  rename("Cytotox_AF" = "Cytotox - AF-adjusted BM", "Cytotox_unadjusted" =  "Cytotox - Unadjusted BM", "Tier2_AF_ECOTOX" = "Tier_2_AF_adjusted_BM",
+         "Tier2_ECOTOX" = "Tier_2_Unadjusted_BM", "AF_ToxCast" = "ToxCast - AF-adjusted BM", "ToxCast_unadjusted" = "ToxCast - Unadjusted BM",
+        "Pharmacological" = "Pharm_Potential")
+WoE_heatmap[is.na(WoE_heatmap)] <- 0
+
+names(target_LoE_forheatmap)
+
+WoE_heatmap_1 <- left_join(WoE_heatmap,WoE_data_1) %>% select(-chnm, -Class, -WoE_Priority) %>% arrange(WoE_BS)
+WoE_heatmap_2 <- left_join(WoE_heatmap_1, (target_LoE_forheatmap %>% select(CAS, target_LoE_BS_final))) 
+WoE_heatmap_2$WoE_BS <- ifelse(WoE_heatmap_2$WoE_BS < 2, 1.5, 
+                               ifelse(WoE_heatmap_2$WoE_BS > 4, 5, 
+                                      3))
+WoE_heatmap_2$target_LoE_BS_final <- ifelse(WoE_heatmap_2$target_LoE_BS_final < 2, 1.5, 
+                               ifelse(WoE_heatmap_2$target_LoE_BS_final > 4, 5, 
+                                      3))
+
+
+WoE_heatmap_2 <- WoE_heatmap_2 %>% rename("WoE_PS" = "WoE_BS","LoE_PS" = "target_LoE_BS_final")%>% column_to_rownames("CAS") 
+
+WoE_heatmap_2 <- as.matrix(WoE_heatmap_2)
+
+class <- WoE_data_1 %>% arrange((WoE_BS)) %>% ungroup()%>% select(CAS, Class) %>% distinct() %>% ungroup() %>% select(Class)
+class <- as.matrix(class)
+
+WoELoE_water$WoE_Priority <- factor(WoELoE_water$WoE_Priority, levels = c("Low Priority", "Medium Priority", "High Priority"))
+WoE_Priority <- left_join(WoE_heatmap_1, (WoELoE_water %>% select(CAS, WoE_Priority)))
+
+cas_prior <- WoE_Priority %>% arrange((WoE_BS)) %>% select(CAS, WoE_Priority) %>% distinct() %>% ungroup() %>% select(WoE_Priority)
+cas_prior <- as.matrix(cas_prior)
+
+row_ha = rowAnnotation(Classification = class, col = list(Classification = c("Pesticides" = "#22a884",
+                                                                             "PPCPs" = "#7ad151",
+                                                                             "WWIs" = "#fde725",
+                                                                             "Fuels/PAHs" = "#414487",
+                                                                             "Flame retardants" = "#440154",
+                                                                             "Industrial/Multi-Use Compounds" = "#2a788e")))
+
+apical_WoE_prioritization_heatmap_final <- Heatmap(WoE_heatmap_2, col = c("#000004","#0d0887","#7e03a8", "#cc4778","#f89540","#f0f921"), column_title_side = "bottom", 
+                                                   row_title_side = "left", show_heatmap_legend = TRUE, row_names_side = "left", 
+                                                   row_title = "Detected Chemical", column_title = "Prioritization Scores", show_row_names = TRUE, left_annotation = row_ha, cluster_rows = FALSE, cluster_columns = FALSE,
+                                                   row_names_gp = grid::gpar(fontsize = 8), row_split = factor(cas_prior, levels = c("High Priority", "Medium Priority", "Low Priority")))
+
+apical_WoE_prioritization_heatmap_final
+
+#Consider E-Fate####
+PBT <- left_join(WoELoE_water, e_fate_1)
+PBT$EFate_BS <- ifelse(is.na(PBT$EFate_BS), PBT$target_LoE_BS_final, PBT$EFate_BS)
+PBT$EFate_Bin <- as.factor(PBT$EFate_Bin)
+summary(PBT)
+
+#scatter###
+PBT$BCF_Lkg <- as.numeric(PBT$BCF_Lkg)
+PBT$Half_life_days <- as.numeric(PBT$Half_life_days)
+
+apical_efate_plot <- PBT %>% ggscatter("Half_life_days", "BCF_Lkg", color = "black", fill = "EFate_Bin", palette = viridis(n = 6, option = "plasma"), size = 3, shape = 21) +
+  geom_hline(yintercept = 2000, linetype = "dashed") + geom_hline(yintercept = 5000, linetype = "dashed") + geom_vline(xintercept = 40, linetype = "dashed") + 
+  geom_vline(xintercept = 60, linetype = "dashed") + xlab("Aquatic Half-Life (t1/2, d)") + ylab("Bioconcentration Factor (BCF; L/kg)") + scale_y_log10() + scale_x_log10()
+apical_efate_plot
+ggsave("Apical_EFate_scatter.jpeg", apical_efate_plot, height = 5, width = 7.5)
+
+#get PBT geomean PS### 
+
+PBT_BinScore <- PBT %>% select(CAS, target_LoE_BS_final, EFate_BS) %>% gather(target_LoE_BS_final:EFate_BS, key = "BS_type", value = "BS") %>% 
+  group_by(CAS) %>% summarize(PBT_BinScore = median(BS, na.rm = TRUE))
+
+PBT_final <- left_join(PBT, PBT_BinScore)
+
+PBT_final$PBT_priority <- ifelse(PBT_final$PBT_BinScore <= 2, "Low Priority",
+                                     ifelse(PBT_final$PBT_BinScore >= 4.5, "High Priority",
+                                            ifelse(PBT_final$PBT_BinScore > 2 & PBT_final$PBT_BinScore < 4.5, "Medium Priority",
+                                                   "Data Limited")))
+
+PBT_final$Final_Priority_Class <- PBT_final$PBT_priority
+PBT_final$Final_Priority_Class <- ifelse(PBT_final$Flag_Decision == "Include Uncertainty Flag on Final Prioritization",
+                                             paste(PBT_final$PBT_priority, "a"),
+                                             ifelse(PBT_final$Flag_Decision == "Use WoE Bin Scores for Prioritization", paste(PBT_final$PBT_priority, "b"),
+                                                    PBT_final$PBT_priority))
+
+PBT_final$PBT_priority <- as.factor(PBT_final$PBT_priority)
+summary(PBT_final$PBT_priority)
+
+#pull together LoE for apical and bind in before writing to file####
+target_LoE_apical_BS <- target_LoE %>% select(CAS, benchmarks, LoE_BS) %>% spread(key = benchmarks, value = LoE_BS) %>%
+  rename("Screening_Apical (target BS)" = "Screening_Apical", "Tier1_AF_adjusted (target BS)" = "Tier_1_AF_adjusted_BM", "Tier1_unadjusted (target BS)" = "Tier_1_Unadjusted_BM")
+target_LoE_apical_TQ <- target_LoE %>% select(CAS, benchmarks, TQ_max, det_freq) %>% spread(key = benchmarks, value = TQ_max) %>%
+  rename("Screening_Apical (TQ_max)" = "Screening_Apical", "Tier1_AF_adjusted (TQ_max)" = "Tier_1_AF_adjusted_BM", "Tier1_unadjusted (TQ_max)" = "Tier_1_Unadjusted_BM")
+
+target_LoE_apical <- left_join(target_LoE_apical_TQ, target_LoE_apical_BS)
+
+PBT_apical_final <- left_join(target_LoE_apical, PBT_final, join_by(CAS))
+
+write_xlsx(PBT_apical_final, "Water_Apical_prioritization.xlsx")
+
+#create Complex heatmap####
+apical_prioritization_heatmap <- PBT_final %>% arrange(desc(PBT_BinScore)) %>% select(CAS, target_LoE_BS_final, WoE_BS, EFate_BS, PBT_BinScore) %>%
+  rename("Target LoE" = target_LoE_BS_final, "WoE" = WoE_BS, "Fate" = EFate_BS,"Final" = PBT_BinScore) %>%
+  distinct() %>% column_to_rownames("CAS")
+apical_prioritization_heatmap <- as.matrix(apical_prioritization_heatmap)
+
+class <- PBT_final %>% arrange(desc(PBT_BinScore)) %>% select(CAS, Class) %>% distinct() %>% ungroup() %>% select(Class)
+class <- as.matrix(class)
+
+PBT_final$PBT_priority <- factor(PBT_final$PBT_priority, levels = c("Low Priority", "Medium Priority", "High Priority"))
+cas_prior <- PBT_final %>% arrange(desc(PBT_BinScore)) %>% select(CAS, PBT_priority) %>% distinct() %>% ungroup() %>% select(PBT_priority)
+cas_prior <- as.matrix(cas_prior)
+
+row_ha = rowAnnotation(Classification = class, col = list(Classification = c("Pesticides" = "#22a884",
+                                                                                 "PPCPs" = "#7ad151",
+                                                                                 "WWIs" = "#fde725",
+                                                                                 "Fuels/PAHs" = "#414487",
+                                                                                 "Flame retardants" = "#440154",
+                                                                                 "Industrial/Multi-Use Compounds" = "#2a788e")))
+
+apical_prioritization_heatmap_final <- Heatmap(apical_prioritization_heatmap, col = c("#000004","#420a68","#932667", "#dd513a","#fca50a","#fcffa4"), column_title_side = "bottom", 
+                                            row_title_side = "left", show_heatmap_legend = TRUE, row_names_side = "left", 
+                                            row_title = "Detected Chemical", column_title = "Prioritization Scores", show_row_names = TRUE, left_annotation = row_ha, cluster_rows = FALSE, cluster_columns = FALSE,
+                                            row_names_gp = grid::gpar(fontsize = 8), row_split = factor(cas_prior, levels = c("High Priority", "Medium Priority", "Low Priority")))
+
+apical_prioritization_heatmap_final
+
+#target LoE == "Non-Apical" ####
+#Identify Target LoE#
+apical_CAS_list
+wqb_CAS_list <- wqb_water %>% select(CAS)
+
+apical_wqb_CAS <- bind_rows(apical_CAS_list, wqb_CAS_list) %>% distinct()
+
+nonapical_CAS_list <- benchmark_coverage_water %>% anti_join(apical_wqb_CAS) %>% filter(
+                                                    `Tier_2_AF_adjusted_BM` == "Water" | `ToxCast - AF-adjusted BM` == "Water" | `Cytotox - AF-adjusted BM` == "Water") %>% select(CAS)
+nonapical_water <- left_join(nonapical_CAS_list, water_summary)
+
+#class summary
+non_apical_water_class <- nonapical_water %>% select(CAS, Class) %>% distinct
+non_apical_water_class$Class <- as.factor(non_apical_water_class$Class)
+summary(non_apical_water_class)
+
+non_apical_water_class_sum <- non_apical_water_class %>% group_by(Class) %>% summarize(n_chem = n_distinct(CAS))
+pie(non_apical_water_class_sum$n_chem, labels = non_apical_water_class_sum$Class, col = viridis(n = 6))
+
+#Target LoE Prioritization####
+target_LoE <- nonapical_water %>% filter(!benchmarks %in% c("Screening_Estimate", "QSAR", "Pharm_Potential"))
+
+#scatterplots#### 
+nonapical_scatter <- target_LoE %>% filter(benchmarks %in% c("Cytotox - AF-adjusted BM", "Cytotox - Unadjusted BM", "Tier_2_AF_adjusted_BM", "Tier_2_Unadjusted_BM")) %>% 
+  ggscatter("det_freq", "TQ_max", color= "black", fill = "Bin", palette = viridis(n = 6, option = "magma"), size = 3, shape = 21, facet.by = "benchmarks", nrow = 3) + scale_y_log10() +
+  geom_hline(yintercept = 0.001, linetype = "dashed") + geom_hline(yintercept = 1, linetype = "dashed") + geom_vline(xintercept = 0.1, linetype = "dashed") + 
+  geom_vline(xintercept = 0.5, linetype = "dashed") + xlab("Detection Frequency (%)") + ylab("Maximum Toxicity Quotient (TQ_max)") + xlim(0,0.8)
+nonapical_scatter
+
+nonapical_scatter2 <- target_LoE %>% filter(!benchmarks %in% c("Cytotox - AF-adjusted BM", "Cytotox - Unadjusted BM", "Tier_2_AF_adjusted_BM", "Tier_2_Unadjusted_BM")) %>% 
+  ggscatter("det_freq", "TQ_max", color= "black", fill = "Bin", palette = viridis(n = 6, option = "magma"), size = 3, shape = 21, facet.by = "benchmarks", nrow = 1) + scale_y_log10() +
+  geom_hline(yintercept = 0.000001, linetype = "dashed") + geom_hline(yintercept = 0.001, linetype = "dashed") + geom_vline(xintercept = 0.1, linetype = "dashed") + 
+  geom_vline(xintercept = 0.5, linetype = "dashed") + xlab("Detection Frequency (%)") + ylab("Maximum Toxicity Quotient (TQ_max)")+ xlim(0,0.8)
+nonapical_scatter2
+
+#median PS across target LoE####
+target_LoE_BS_final <- target_LoE %>% group_by(CAS) %>% summarize(target_LoE_BS_final = median(LoE_BS, na.rm = TRUE))
+target_LoE_final <- left_join(target_LoE_BS_final, (target_LoE %>% select(CAS, Class, chnm))) %>% distinct()  
+
+#Priority Grouping####
+target_LoE_final$Priority_Group <- ifelse(target_LoE_final$target_LoE_BS_final > 4, "High Priority",
+                                          ifelse(target_LoE_final$target_LoE_BS_final <= 4 & target_LoE_final$target_LoE_BS_final >2, "Medium Priority",
+                                                 ifelse(target_LoE_final$target_LoE_BS_final<=2 , "Low Priority",
+                                                        "misc")))
+
+
+target_LoE_final$Priority_Group <- as.factor(target_LoE_final$Priority_Group)
+summary(target_LoE_final$Priority_Group)
+
+#WoE Prioritization####
+non_apical_cas <- target_LoE %>% select(CAS)
+
+WoE_data <- left_join(non_apical_cas, nonapical_water) %>% filter(benchmarks %in% c("Screening_Estimate", "QSAR", "Pharm_Potential"))
+WoE_data_1 <- WoE_data %>% group_by(CAS, chnm, Class) %>% summarize(WoE_BS = median(LoE_BS, na.rm = TRUE))
+WoE_data_1$WoE_Priority <- ifelse(WoE_data_1$WoE_BS <= 2, "Low Priority", 
+                                  ifelse(WoE_data_1$WoE_BS >= 5, "High Priority",
+                                         ifelse(WoE_data_1$WoE_BS > 2 & WoE_data_1$WoE_BS < 5, "Medium Priority", "misc")))
+
+WoE_data_1$WoE_Priority <- as.factor(WoE_data_1$WoE_Priority)
+summary(WoE_data_1)
+
+#make heat map for WQB WoE####
+WoE_heatmap <- WoE_data %>% select(CAS, chnm, benchmarks, LoE_BS) %>% distinct() %>% spread(key = benchmarks, value = LoE_BS)
+WoE_heatmap[is.na(WoE_heatmap)] <- 0
+
+WoE_heatmap_1 <- left_join(WoE_heatmap,WoE_data_1) %>% select(-CAS, -Class, -WoE_Priority) %>% arrange(WoE_BS) %>% column_to_rownames("chnm") 
+WoE_heatmap_1 <- as.matrix(WoE_heatmap_1)
+
+superheat(WoE_heatmap_1, row.title = "Ecotoxicological Line of Evidence", column.title = "Detected Chemical", 
+          bottom.label.text.angle = 90, left.label.col = "white", bottom.label.col = "white",force.left.label = TRUE)
+
+#compare WoE PS to LoE PS####
+WoELoE_water <- left_join(target_LoE_final, WoE_data_1)
+WoELoE_water$Flag <- ifelse(WoELoE_water$WoE_Priority != WoELoE_water$Priority_Group, "Flag", "-")
+WoELoE_water$Flag <- as.factor(WoELoE_water$Flag)
+
+WoELoE_water$Flag_Description <- ifelse((WoELoE_water$WoE_BS > WoELoE_water$target_LoE_BS_final) & WoELoE_water$Flag == "Flag", "Higher Risk",
+                                        ifelse((WoELoE_water$WoE_BS < WoELoE_water$target_LoE_BS_final) & WoELoE_water$Flag == "Flag", "Lower Risk",
+                                               "-"))
+WoELoE_water$Flag_Decision <- ifelse(WoELoE_water$Flag_Description %in% c("Lower Risk","Higher Risk"), "Include Uncertainty Flag on Final Prioritization", "-")
+
+#Consider E-Fate####
+PBT <- left_join(WoELoE_water, e_fate_1)
+PBT
+
+PBT$EFate_Bin <- as.factor(PBT$EFate_Bin)
+list(unique(PBT$EFate))
+
+#scatter
+PBT$Half_life_days <- as.numeric(PBT$Half_life_days)
+PBT$BCF_Lkg <- as.numeric(PBT$BCF_Lkg)
+
+nonapical_efate_plot <- PBT %>% ggscatter("Half_life_days", "BCF_Lkg", color = "black", fill = "EFate_Bin", palette = viridis(n = 6, option = "plasma"), size = 3, shape = 21) +
+  geom_hline(yintercept = 2000, linetype = "dashed") + geom_hline(yintercept = 5000, linetype = "dashed") + geom_vline(xintercept = 40, linetype = "dashed") + 
+  geom_vline(xintercept = 60, linetype = "dashed") + xlab("Aquatic Half-Life (t1/2, d)") + ylab("Bioconcentration Factor (BCF; L/kg)") + scale_y_log10() + scale_x_log10()
+nonapical_efate_plot
+ggsave("Non_apical_EFate_scatter.jpeg", nonapical_efate_plot, height = 5, width = 7.5)
+
+#get PBT geomean PS#### 
+PBT_BinScore <- PBT %>% select(CAS, target_LoE_BS_final, EFate_BS) %>% gather(target_LoE_BS_final:EFate_BS, key = "BS_type", value = "BS") %>% 
+  group_by(CAS) %>% summarize(PBT_BinScore = median(BS, na.rm = TRUE))
+
+PBT_final <- left_join(PBT, PBT_BinScore)
+
+PBT_final$PBT_priority <- ifelse(PBT_final$PBT_BinScore <= 2, "Low Priority",
+                                 ifelse(PBT_final$PBT_BinScore >= 4.5, "High Priority",
+                                        ifelse(PBT_final$PBT_BinScore > 2 & PBT_final$PBT_BinScore < 4.5, "Medium Priority",
+                                               "Data Limited")))
+
+PBT_final$Final_Priority_Class <- PBT_final$PBT_priority
+PBT_final$Final_Priority_Class <- ifelse(PBT_final$Flag_Decision == "Include Uncertainty Flag on Final Prioritization",
+                                         paste(PBT_final$PBT_priority, "a"),
+                                                PBT_final$PBT_priority)
+
+PBT_final$PBT_priority <- as.factor(PBT_final$PBT_priority)
+summary(PBT_final$PBT_priority)
+
+#pull together LoE for non_apical and bind in before writing to file#### 
+
+target_LoE_nonapical_BS <- target_LoE %>% select(CAS, benchmarks, LoE_BS) %>% spread(key = benchmarks, value = LoE_BS) %>%
+  rename("AF_Cytotox (target BS)" = "Cytotox - AF-adjusted BM", "Cytotox (target BS)" = "Cytotox - Unadjusted BM", "Tier2_AF_adjusted (target BS)" = "Tier_2_AF_adjusted_BM",
+         "Tier2_unadjusted (target BS)" = "Tier_2_Unadjusted_BM", "AF_ToxCast (target BS)" = "ToxCast - AF-adjusted BM", "ToxCast (target BS)" = "ToxCast - Unadjusted BM")
+
+target_LoE_nonapical_TQ <- target_LoE %>% select(CAS, benchmarks, TQ_max, det_freq) %>% spread(key = benchmarks, value = TQ_max) %>%
+  rename("AF_Cytotox (TQmax)" = "Cytotox - AF-adjusted BM", "Cytotox (TQmax)" = "Cytotox - Unadjusted BM", "Tier2_AF_adjusted (TQmax)" = "Tier_2_AF_adjusted_BM",
+         "Tier2_unadjusted (TQmax)" = "Tier_2_Unadjusted_BM", "AF_ToxCast (TQmax)" = "ToxCast - AF-adjusted BM", "ToxCast (TQmax)" = "ToxCast - Unadjusted BM")
+
+target_LoE_nonapical <- left_join(target_LoE_nonapical_TQ, target_LoE_nonapical_BS)
+
+PBT_nonapical_final <- left_join(target_LoE_nonapical, PBT_final)
+
+write_xlsx(PBT_nonapical_final, "Water_NonApical_prioritization.xlsx")
+
+#create Complex heatmap#### 
+nonapical_prioritization_heatmap <- PBT_final %>% arrange(desc(PBT_BinScore)) %>% select(CAS, target_LoE_BS_final, WoE_BS, EFate_BS, PBT_BinScore) %>%
+  rename("Target LoE" = target_LoE_BS_final, "WoE" = WoE_BS, "Fate" = EFate_BS,"Final" = PBT_BinScore) %>%
+  distinct() %>% column_to_rownames("CAS")
+nonapical_prioritization_heatmap <- as.matrix(nonapical_prioritization_heatmap)
+
+class <- PBT_final %>% arrange(desc(PBT_BinScore)) %>% select(CAS, Class) %>% distinct() %>% ungroup() %>% select(Class)
+class <- as.matrix(class)
+
+PBT_final$PBT_priority <- factor(PBT_final$PBT_priority, levels = c("Low Priority", "Medium Priority", "High Priority"))
+cas_prior <- PBT_final %>% arrange(desc(PBT_BinScore)) %>% select(CAS, PBT_priority) %>% distinct() %>% ungroup() %>% select(PBT_priority)
+cas_prior <- as.matrix(cas_prior)
+
+row_ha = rowAnnotation(Classification = class, col = list(Classification = c("Pesticides" = "#22a884",
+                                                                             "PPCPs" = "#7ad151",
+                                                                             "WWIs" = "#fde725",
+                                                                             "Fuels/PAHs" = "#414487",
+                                                                             "Flame retardants" = "#440154",
+                                                                             "Industrial/Multi-Use Compounds" = "#2a788e")))
+
+nonapical_prioritization_heatmap_final <- Heatmap(nonapical_prioritization_heatmap, col = c("#000004","#420a68","#932667", "#dd513a","#fca50a","#fcffa4"), column_title_side = "bottom", 
+                                               row_title_side = "left", show_heatmap_legend = FALSE, row_names_side = "left", 
+                                               row_title = "Detected Chemical", column_title = "Prioritization Scores", show_row_names = TRUE, left_annotation = row_ha, cluster_rows = FALSE, cluster_columns = FALSE,
+                                               row_names_gp = grid::gpar(fontsize = 8), row_split = factor(cas_prior, levels = c("High Priority", "Medium Priority", "Low Priority")))
+
+nonapical_prioritization_heatmap_final
+
+#targeted LoE == "Estimated"####
+#Identify chemical list##
+non_estimated_CAS <- bind_rows(wqb_CAS_list, apical_CAS_list, nonapical_CAS_list) %>% distinct()
+estimated_CAS_list <- benchmark_coverage_water %>% anti_join(non_estimated_CAS) %>% filter(
+  `Pharm_Potential` == "Water" | `QSAR` == "Water" | `Screening_Estimate` == "Water") %>% select(CAS) %>% distinct()
+
+estimated_water <- left_join(estimated_CAS_list, water_summary) %>% filter(!is.na(LoE_BS))
+
+#identify chemical classes####
+estimated_water_class <- estimated_water %>% select(CAS, Class) %>% distinct
+estimated_water_class$Class <- as.factor(estimated_water_class$Class)
+summary(estimated_water_class)
+
+estimated_water_class_sum <- estimated_water_class %>% group_by(Class) %>% summarize(n_chem = n_distinct(CAS))
+pie(estimated_water_class_sum$n_chem, labels = estimated_water_class_sum$Class, col = viridis(n = 6))
+
+#Target LoE Prioritization###
+
+target_LoE <- estimated_water %>% filter(benchmarks %in% c("Screening_Estimate", "QSAR", "Pharm_Potential"))
+
+#scatterplots###
+estimated_scatter1 <- target_LoE %>% filter(benchmarks %in% c("Screening_Estimate")) %>%
+  ggscatter("det_freq", "TQ_max", color= "black", fill = "Bin", palette = viridis(n = 6, option = "magma"), size = 3, shape = 21, facet.by = "benchmarks", nrow = 3) + scale_y_log10() +
+  geom_hline(yintercept = 0.001, linetype = "dashed") + geom_hline(yintercept = 1, linetype = "dashed") + geom_vline(xintercept = 0.1, linetype = "dashed") + 
+  geom_vline(xintercept = 0.5, linetype = "dashed") + xlab("Detection Frequency (%)") + ylab("Maximum Toxicity Quotient (TQ_max)")
+estimated_scatter1
+
+estimated_scatter2 <- target_LoE %>% filter(benchmarks %in% c("QSAR", "Pharm_Potential"))%>%
+  ggscatter("det_freq", "TQ_max", color= "black", fill = "Bin", palette = viridis(n = 6, option = "magma"), size = 3, shape = 21, facet.by = "benchmarks", nrow = 3) + scale_y_log10() +
+  geom_hline(yintercept = 0.000001, linetype = "dashed") + geom_hline(yintercept = 0.001, linetype = "dashed") + geom_vline(xintercept = 0.1, linetype = "dashed") + 
+  geom_vline(xintercept = 0.5, linetype = "dashed") + xlab("Detection Frequency (%)") + ylab("Maximum Toxicity Quotient (TQ_max)")
+estimated_scatter2
+
+#median BS across target LoE 
+target_LoE_BS_final <- target_LoE %>% group_by(CAS) %>% summarize(target_LoE_BS_final = median(LoE_BS, na.rm = TRUE))
+target_LoE_final <- left_join(target_LoE_BS_final, (target_LoE %>% select(CAS, Class, chnm))) %>% distinct()  
+
+#Priority Grouping#### 
+target_LoE_final$Priority_Group <- ifelse(target_LoE_final$target_LoE_BS_final > 4, "High Priority",
+                                          ifelse(target_LoE_final$target_LoE_BS_final <= 4 & target_LoE_final$target_LoE_BS_final >2, "Medium Priority",
+                                                 ifelse(target_LoE_final$target_LoE_BS_final<=2 , "Low Priority",
+                                                        "misc")))
+
+target_LoE_final$Priority_Group <- as.factor(target_LoE_final$Priority_Group)
+summary(target_LoE_final$Priority_Group)
+
+#WoE prioritization = not conducted on compounds with estimated benchmarks as LoE####
+
+#Consider E-Fate####
+PBT <- left_join(target_LoE_final, e_fate_1) %>% distinct()
+PBT
+PBT$EFate_BS <- ifelse(is.na(PBT$EFate_BS), PBT$target_LoE_BS_final, PBT$EFate_BS)
+
+PBT$EFate_Bin <- as.factor(PBT$EFate_Bin)
+summary(PBT)
+
+#scatter
+PBT$BCF_Lkg <- as.numeric(PBT$BCF_Lkg)
+PBT$Half_life_days <- as.numeric(PBT$Half_life_days)
+
+estimated_efate_plot <- PBT %>% ggscatter("Half_life_days", "BCF_Lkg", color = "black", fill = "EFate_Bin", palette = viridis(n = 6, option = "plasma"), size = 3, shape = 21) +
+  geom_hline(yintercept = 2000, linetype = "dashed") + geom_hline(yintercept = 5000, linetype = "dashed") + geom_vline(xintercept = 40, linetype = "dashed") + 
+  geom_vline(xintercept = 60, linetype = "dashed") + xlab("Aquatic Half-Life (t1/2, d)") + ylab("Bioconcentration Factor (BCF; L/kg)") + scale_y_log10() + scale_x_log10()
+estimated_efate_plot
+ggsave("Estimated_EFate_scatter.jpeg", estimated_efate_plot, height = 5, width = 7.5)
+
+#get PBT geomean PS#### 
+PBT_BinScore <- PBT %>% select(CAS, target_LoE_BS_final, EFate_BS) %>% gather(target_LoE_BS_final:EFate_BS, key = "BS_type", value = "BS") %>% 
+  group_by(CAS) %>% summarize(PBT_BinScore = median(BS, na.rm = TRUE))
+
+PBT_final <- left_join(PBT, PBT_BinScore)
+
+PBT_final$PBT_priority <- ifelse(PBT_final$PBT_BinScore <= 2, "Low Priority",
+                                 ifelse(PBT_final$PBT_BinScore >= 4.5, "High Priority",
+                                        ifelse(PBT_final$PBT_BinScore > 2 & PBT_final$PBT_BinScore < 4.5, "Medium Priority",
+                                               "Data Limited")))
+summary(PBT_final$PBT_priority)
+
+PBT_final$Final_Priority_Class <- PBT_final$PBT_priority
+PBT_final$PBT_priority <- as.factor(PBT_final$PBT_priority)
+summary(PBT_final$PBT_priority)
+
+#pull together LoE for non_apical and bind in before writing to file ####
+target_LoE_estimated_BS <- target_LoE %>% select(CAS, benchmarks, LoE_BS) %>% spread(key = benchmarks, value = LoE_BS) %>%
+  rename("Screening_Estimate (target BS)" = "Screening_Estimate", "Pharmacological (target BS)" = "Pharm_Potential", "QSAR (target BS)" = "QSAR")
+
+target_LoE_estimated_TQ <- target_LoE %>% select(CAS, benchmarks, TQ_max, det_freq) %>% spread(key = benchmarks, value = TQ_max) %>%
+  rename("Screening_Estimate (TQ_max)" = "Screening_Estimate", "Pharmacological (TQ_max)" = "Pharm_Potential", "QSAR (TQ_max)" = "QSAR")
+
+target_LoE_estimated <- left_join(target_LoE_estimated_TQ, target_LoE_estimated_BS)
+
+PBT_estimated_final <- left_join(target_LoE_estimated, PBT_final)
+
+write_xlsx(PBT_estimated_final, "Water_Estimated_prioritization.xlsx")
+
+#create Complex heatmap#### 
+estimated_prioritization_heatmap <- PBT_final %>% arrange(desc(PBT_BinScore)) %>% select(CAS, target_LoE_BS_final, EFate_BS, PBT_BinScore) %>%
+  rename("Target LoE" = target_LoE_BS_final, "Fate" = EFate_BS,"Final" = PBT_BinScore) %>%
+  distinct() %>% column_to_rownames("CAS")
+estimated_prioritization_heatmap <- as.matrix(estimated_prioritization_heatmap)
+
+class <- PBT_final %>% arrange(desc(PBT_BinScore)) %>% select(CAS, Class) %>% distinct() %>% ungroup() %>% select(Class)
+class <- as.matrix(class)
+
+PBT_final$PBT_priority <- factor(PBT_final$PBT_priority, levels = c("Low Priority", "Medium Priority", "High Priority"))
+cas_prior <- PBT_final %>% arrange(desc(PBT_BinScore)) %>% select(CAS, PBT_priority) %>% distinct() %>% ungroup() %>% select(PBT_priority)
+cas_prior <- as.matrix(cas_prior)
+
+row_ha = rowAnnotation(Classification = class, col = list(Classification = c("Pesticides" = "#22a884",
+                                                                             "PPCPs" = "#7ad151",
+                                                                             "WWIs" = "#fde725",
+                                                                             "Fuels/PAHs" = "#414487",
+                                                                             "Flame retardants" = "#440154",
+                                                                             "Industrial/Multi-Use Compounds" = "#2a788e")))
+
+estimated_prioritization_heatmap_final <- Heatmap(estimated_prioritization_heatmap, col = c("#000004","#420a68","#932667", "#dd513a","#fca50a","#fcffa4"), column_title_side = "bottom", 
+                                                  row_title_side = "left", show_heatmap_legend = FALSE, row_names_side = "left", 
+                                                  row_title = "Detected Chemical", column_title = "Prioritization Scores", show_row_names = TRUE, left_annotation = row_ha, cluster_rows = FALSE, cluster_columns = FALSE,
+                                                  row_names_gp = grid::gpar(fontsize = 8), row_split = factor(cas_prior, levels = c("High Priority", "Medium Priority", "Low Priority")))
+
+estimated_prioritization_heatmap_final
